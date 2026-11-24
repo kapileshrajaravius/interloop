@@ -1,0 +1,2 @@
+# Listings to hide from Interloop for good.
+# Put one listing id (like a1daf01w) or its full URL per line.

@@ -1,19 +1,25 @@
-# Publishes the public/ folder to GitHub Pages on every push to main.
+# Publishes public/ to GitHub Pages and keeps listings fresh.
+#  - Every push to main: rebuilds the live-listings file (USAJOBS) and deploys.
+#  - Every Monday, or a manual run: also runs the AI web search for new summer
+#    programs, internships and volunteering, re-checks earlier finds, saves them
+#    to data/found-listings.json, and deploys.
 name: Deploy to GitHub Pages
 
 on:
   push:
     branches: [main]
+  schedule:
+    - cron: "17 11 * * 1"   # Mondays, about 5-6am Central
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   pages: write
   id-token: write
 
 concurrency:
   group: pages
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   deploy:
@@ -23,6 +29,25 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Refresh listings
+        run: node scripts/update-listings.mjs
+        env:
+          USAJOBS_API_KEY: ${{ secrets.USAJOBS_API_KEY }}
+          USAJOBS_EMAIL: ${{ secrets.USAJOBS_EMAIL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          RESEARCH: ${{ github.event_name != 'push' }}
+      - name: Save new finds to the repo
+        if: github.event_name != 'push'
+        run: |
+          git config user.name "interloop-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/
+          if git diff --cached --quiet; then echo "No listing changes."; exit 0; fi
+          git commit -m "Weekly listings update"
+          git pull --rebase origin main && git push origin HEAD:main
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:
