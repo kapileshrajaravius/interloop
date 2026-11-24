@@ -37,6 +37,8 @@ jobs:
         env:
           USAJOBS_API_KEY: ${{ secrets.USAJOBS_API_KEY }}
           USAJOBS_EMAIL: ${{ secrets.USAJOBS_EMAIL }}
+          ADZUNA_APP_ID: ${{ secrets.ADZUNA_APP_ID }}
+          ADZUNA_APP_KEY: ${{ secrets.ADZUNA_APP_KEY }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           RESEARCH: ${{ github.event_name != 'push' }}
       - name: Save new finds to the repo

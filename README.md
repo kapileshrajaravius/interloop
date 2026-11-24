@@ -15,8 +15,10 @@ Interloop by LEAP C.O. helps high schoolers in grades 9–12 find internships, s
 | Source | What it adds | When | Secret(s) |
 |---|---|---|---|
 | USAJOBS API | Federal Pathways internships open to high schoolers | Every run | `USAJOBS_API_KEY`, `USAJOBS_EMAIL` |
+| Adzuna API | Internships from job boards that mention high schoolers | Every run | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` |
 | AI web search (Gemini + Google Search) | Summer programs, internships and volunteering from official sites | Mondays and manual runs | `GEMINI_API_KEY` |
 | Idealist API | Volunteering (planned, needs partner approval) | — | — |
+| Points of Light Engage | Volunteering (planned, needs partner approval) | — | — |
 
 Every AI find is checked against its official page (must load and mention high schoolers) before it's kept. Finds are saved in `data/found-listings.json`, re-checked weekly, and dropped when the deadline passes or the page disappears.
 

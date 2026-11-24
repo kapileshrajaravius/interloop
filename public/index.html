@@ -873,7 +873,7 @@ function badgesHTML(o){
   let h=`<span class="badge" style="${tint(t[1],t[2])}">${icon(t[0])}${o.type}</span>`;
   if(o.featured) h+=`<span class="badge" style="${tint("--violet-700","141,84,255")}">${icon("shield-check")}Curated</span>`;
   if(o.trending) h+=`<span class="badge" style="${tint("--rose-700","255,35,87")}">${icon("trending-up")}Trending</span>`;
-  if(o.live) h+=`<span class="badge" style="${tint("--emerald-700","0,187,127")}">${icon(o.source==="USAJOBS"?"landmark":"search")}${esc(o.source==="AI search"?"Found by web search":o.source||"Live")}</span>`;
+  if(o.live) h+=`<span class="badge" style="${tint("--emerald-700","0,187,127")}">${icon(o.source==="USAJOBS"?"landmark":o.source==="Adzuna"?"briefcase":"search")}${esc(o.source==="AI search"?"Found by web search":o.source||"Live")}</span>`;
   const st=S.track[o.id]; if(st) h+=`<span class="badge" style="${tint("--emerald-700","0,187,127")}">${icon("flag")}${esc(st)}</span>`;
   return h;
 }

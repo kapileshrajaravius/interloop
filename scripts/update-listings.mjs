@@ -3,6 +3,8 @@
 //  This is the site's only source of listings (there are no built-in ones).
 //  1. USAJOBS API     - federal Pathways internships open to high schoolers.
 //                       Re-fetched on every run. Secrets: USAJOBS_API_KEY, USAJOBS_EMAIL.
+//  1b. Adzuna API     - internships from job boards across the web that mention high schoolers.
+//                       Re-fetched on every run. Secrets: ADZUNA_APP_ID, ADZUNA_APP_KEY (free at developer.adzuna.com).
 //  2. AI web search   - summer programs, internships and volunteering anywhere on the web,
 //                       found by Gemini with Google Search grounding. Runs only on the weekly
 //                       schedule or a manual run (RESEARCH=true), not on every push.
@@ -113,6 +115,42 @@ async function usajobs() {
     });
   }
   console.log(`USAJOBS: ${items.length} student postings, ${out.length} open to high schoolers.`);
+  return out;
+}
+
+/* ---------- 1b. Adzuna ---------- */
+async function adzuna() {
+  if (!env.ADZUNA_APP_ID || !env.ADZUNA_APP_KEY) { console.log("Adzuna: no API key set, skipping."); return []; }
+  const queries = ["high school intern", "high school internship", "summer internship high school students", "high school summer program", "teen internship", "student intern high school"];
+  const raw = [];
+  for (const what of queries) {
+    const q = new URLSearchParams({ app_id: env.ADZUNA_APP_ID, app_key: env.ADZUNA_APP_KEY, results_per_page: "50", what, max_days_old: "60", "content-type": "application/json" });
+    const res = await fetch("https://api.adzuna.com/v1/api/jobs/us/search/1?" + q);
+    if (!res.ok) { console.error(`Adzuna "${what}": HTTP ${res.status}`); continue; }
+    raw.push(...((await res.json()).results || []));
+  }
+  const seen = new Set(), out = [];
+  for (const r of raw) {
+    const text = `${r.title} ${r.description}`;
+    if (!/high[- ]school/i.test(text)) continue;                                  // must mention high schoolers
+    if (!/intern|summer|apprentic|trainee|program|fellow|camp/i.test(text)) continue; // internship-like, not a regular job
+    if (/\b(college|undergraduate|university) (students?|juniors?|seniors?) only\b|must be (enrolled in|pursuing) (a )?(bachelor|college|university)/i.test(text)) continue;
+    const id = "z" + r.id;
+    const key = normTitle(r.title) + "|" + normTitle(r.company?.display_name);
+    if (seen.has(id) || seen.has(key)) continue; seen.add(id); seen.add(key);
+    const lo = Number(r.salary_min) || 0, hi = Number(r.salary_max) || 0;
+    const pay = lo || hi ? (lo > 1000 || hi > 1000 ? `$${Math.round((lo || hi) / 1000)}k${hi && hi !== lo ? "–$" + Math.round(hi / 1000) + "k" : ""}/yr` : `$${lo || hi}${hi && hi !== lo ? "–$" + hi : ""}/hr`) : "See posting";
+    out.push({
+      id, title: clip(r.title, 120), company: clip(r.company?.display_name || "See posting", 120),
+      location: clip(r.location?.display_name || "See posting", 90), type: "Internship",
+      category: guessCategory(text), grades: [10, 11, 12], cost: lo || hi ? "paid" : "free", stipend: pay,
+      comp: "Competitive", format: /\bremote\b/i.test(text) ? "Remote" : /\bhybrid\b/i.test(text) ? "Hybrid" : "In-Person",
+      duration: r.contract_time === "part_time" ? "Part-time" : r.contract_time === "full_time" ? "Full-time" : "",
+      deadline: "", deadlineISO: "", url: r.redirect_url,
+      desc: clip(r.description, 240), equity: [], materials: ["resume"], source: "Adzuna", foundAt: (r.created || "").slice(0, 10)
+    });
+  }
+  console.log(`Adzuna: ${raw.length} results, ${out.length} internship-style postings open to high schoolers.`);
   return out;
 }
 
@@ -263,6 +301,8 @@ const listings = [];
 
 try { const u = await usajobs(); listings.push(...u); sources.USAJOBS = u.length; }
 catch (e) { console.error("USAJOBS failed, continuing without it:", e.message); }
+try { const z = await adzuna(); listings.push(...z); sources.Adzuna = z.length; }
+catch (e) { console.error("Adzuna failed, continuing without it:", e.message); }
 
 let found = (await readJSON(FOUND, { listings: [] })).listings || [];
 found = await recheck(found);
