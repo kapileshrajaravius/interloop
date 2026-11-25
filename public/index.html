@@ -623,7 +623,7 @@ const DATABASES = [
 const GRADES = {9:{label:"9th Grade",ages:"14–15"},10:{label:"10th Grade",ages:"15–16"},11:{label:"11th Grade",ages:"16–17"},12:{label:"12th Grade",ages:"17–18"}};
 const E = DATA.enums;
 const COST_LABEL = {free:"Unpaid / Free", paid:"Pays you", pay_to_join:"Pay to join"};
-const COMP_RANK = {"Most Competitive":5,"Highly Competitive":4,"Competitive":3,"Moderate":2,"Accessible":1};
+const COMP_RANK = {"Most Competitive":5,"Highly Competitive":4,"Competitive":3,"Moderate":2,"Accessible":1,"Not listed":0};
 const EQUITY = {
   "fully-funded":["Fully Funded","--emerald-700","0,187,127"],
   "low-income":["Need-Based Aid","--green-700","0,199,88"],
@@ -645,8 +645,28 @@ const ALL = [
 ];
 ALL.forEach((o,i)=>o.order=i);
 const BYID = Object.fromEntries(ALL.map(o=>[o.id,o]));
+/* College numbers, refreshed monthly by GitHub Actions (data/colleges.json). */
+const COLLEGE_DB = {
+  data:{}, updated:null,
+  norm:s=>String(s||"").toLowerCase().replace(/&/g,"and").replace(/[^a-z0-9]+/g," ").trim(),
+  find(name){ const n=this.norm(name); if(!n) return null;
+    for(const [k,v] of Object.entries(this.data)){ const kn=this.norm(k); if(kn===n) return [k,v]; }
+    for(const [k,v] of Object.entries(this.data)){ const kn=this.norm(k); if(n.length>=4&&(kn.includes(n)||n.includes(kn))) return [k,v]; }
+    return null; },
+  year(name){ const f=this.find(name); return f?f[1].year:""; },
+  fill(c){ const f=this.find(c.name); if(!f) return false; const v=f[1];
+    c.name=f[0]; c.admit=v.admit!=null?String(v.admit):""; c.satLo=v.satLo!=null?String(v.satLo):""; c.satHi=v.satHi!=null?String(v.satHi):""; c.gpa=v.gpa!=null?String(v.gpa):""; c.src="ai"; return true; }
+};
+async function loadColleges(){
+  try{ const r=await fetch("data/colleges.json",{cache:"no-cache"}); if(!r.ok) return; const j=await r.json();
+    COLLEGE_DB.data=j.colleges||{}; COLLEGE_DB.updated=j.updated||null;
+    let changed=false; for(const c of P.colleges){ if(!c.admit&&!c.satLo&&!c.gpa&&COLLEGE_DB.fill(c)) changed=true; }
+    if(changed) persist();
+    if(S.route==="chances") renderTool();
+  }catch(e){}
+}
 /* Live listings, refreshed by GitHub Actions (scripts/update-listings.mjs).
-   Missing file (e.g. the artifact preview or Firebase test copy) just means none. */
+   A missing file (e.g. in the artifact preview) just means none. */
 let LIVE = {updated:null, count:0, loaded:false};
 async function loadLive(){
   try{
@@ -656,7 +676,7 @@ async function loadLive(){
     for(const x of list){
       if(!x||!x.id||!x.title||!x.url||BYID[x.id]||!/^https:\/\//.test(x.url)) continue;
       const o={featured:false,trending:false,acceptance:"",gpa:"",pay:0,fee:0,equity:[],materials:[],grades:[10,11,12],
-        format:"In-Person",cost:"paid",comp:"Competitive",type:"Internship",category:"Government/Policy",duration:"",deadline:"",desc:"",stipend:"",location:"",company:"",
+        format:"In-Person",cost:"paid",comp:"Not listed",type:"Internship",category:"Government/Policy",duration:"",deadline:"",desc:"",stipend:"",location:"",company:"",
         ...x, live:true, order:ALL.length};
       if(!E.c.includes(o.category)) o.category="Government/Policy";
       if(!E.j.includes(o.format)) o.format="In-Person";
@@ -714,9 +734,10 @@ function setSync(t){ const n=$("#syncNote"); if(n) n.textContent=t; }
 
 
 /* ---------------- AI ----------------
-   On the website, a small Firebase script (Firebase AI Logic + App Check) sets
-   window.InterloopAI. The Gemini key stays in the Firebase project, never in this page.
-   Without it (e.g. inside the artifact preview), the AI buttons stay hidden. */
+   All AI work happens ahead of time in GitHub Actions (scripts/update-listings.mjs):
+   listing tips and college numbers arrive in the weekly data files. There's no
+   AI call from the browser, so these hooks stay off unless something sets
+   window.InterloopAI. */
 const aiReady = ()=>!!(window.InterloopAI && typeof window.InterloopAI.text==="function");
 async function aiText(prompt){
   try{ return String(await window.InterloopAI.text(prompt)||""); }
@@ -788,7 +809,7 @@ function renderStats(){
   const n=f=>ALL.filter(f).length;
   const items=[[ALL.length,"opportunities"],[n(o=>o.type==="Summer Program"),"summer programs"],[n(o=>o.type==="Internship"),"internships"],[n(o=>o.type==="Volunteering"),"volunteering"],[n(o=>o.cost==="paid"),"pay you"],[n(o=>o.cost==="free"),"free"],[n(o=>o.equity.length),"equity-tagged"]];
   if(typeof LIVE!=="undefined" && LIVE.updated) items.push([new Date(LIVE.updated).toLocaleDateString(undefined,{month:"short",day:"numeric"}),"last updated"]);
-  $("#stats").innerHTML = items.map(([v,l])=>`<span class="stat"><b>${v}</b>${l}</span>`).join("");
+  $("#stats").innerHTML = items.filter(([v],i)=>i===0||v).map(([v,l])=>`<span class="stat"><b>${v}</b>${l}</span>`).join("");
 }
 function renderGradeChips(){
   $("#gradeChips").innerHTML = [9,10,11,12].map(g=>`<button type="button" class="gchip" data-gchip="${g}" aria-pressed="${S.grades.has(g)}">${icon("graduation-cap")}${GRADES[g].label}<small>· Ages ${GRADES[g].ages}</small></button>`).join("");
@@ -890,7 +911,7 @@ function card(o){
     <div class="meta">
       <span>${icon("map-pin")}${esc(o.location)}</span>
       <span>${icon("briefcase")}${esc(o.format)}</span>
-      <span>${icon("trophy")}${esc(o.comp)}</span>
+      ${o.comp&&o.comp!=="Not listed"?`<span>${icon("trophy")}${esc(o.comp)}</span>`:""}
       ${o.duration?`<span>${icon(o.type==="Summer Program"?"sun":"clock")}${esc(o.duration)}</span>`:""}
       ${dl?`<span>${icon("calendar-clock")}${esc(dl)}</span>`:""}
       <span class="chip">${icon("graduation-cap")}${gradeText(o.grades)}</span>
@@ -1013,6 +1034,8 @@ async function saveOutcomes(items){
 function accRate(o){ const n=(String(o.acceptance).match(/\d+(\.\d+)?/g)||[]).map(Number); return n.length? n.reduce((a,b)=>a+b,0)/n.length : null; }
 function oddsFor(o){
   const a=accRate(o), gpa=parseFloat(P.profile.gpa), min=parseFloat(o.gpa);
+  { const g=+P.profile.grade; if(g && !o.grades.includes(g)) return {lvl:-1,label:"Not your grade yet",cls:"mute",why:[`open to ${gradeText(o.grades).toLowerCase()}`]}; }
+  if(a==null && !COMP_RANK[o.comp]) return {lvl:-1,label:"Not enough info",cls:"mute",why:["this listing doesn't publish an acceptance rate"]};
   let lvl = a!=null ? (a<10?0:a<35?1:2) : ({5:0,4:0,3:1,2:2,1:2}[COMP_RANK[o.comp]]);
   const why=[];
   if(a!=null) why.push(`about ${Math.round(a*10)/10}% get in`); else why.push(o.comp.toLowerCase());
@@ -1027,6 +1050,7 @@ const TIPS = {
   "Highly Competitive":"Highly selective. Strong grades help, but specific evidence of initiative matters more. Show what you've built, researched, or led, and apply to a few similar programs as backups.",
   "Competitive":"Solid academics and authentic interest are key. Show specific experiences and apply to multiple similar programs as a backup strategy.",
   "Moderate":"A clear, genuine application goes a long way. Explain why this program fits your goals and what you'll bring to it.",
+  "Not listed":"This listing doesn't say how selective it is. Read the requirements on the official page carefully, apply early, and apply to a few similar opportunities too.",
   "Accessible":"Open to most students who apply. Show up consistently and keep track of your hours and impact. That's what makes it count later."
 };
 const TRACK = ["Interested","Applied","Accepted!","Not accepted"];
@@ -1058,6 +1082,7 @@ function openDetails(id){
     </div>
     <p class="d-desc">${esc(o.desc)}</p>
     ${o.materials.length?`<div class="d-sec"><p class="d-k">What you'll need</p><p>${o.materials.map(esc).join(" · ")}</p></div>`:""}
+    ${o.aiFit||o.aiTip?`<div class="d-sec"><p class="d-k">${icon("sparkles")} AI take</p>${o.aiFit?`<p><b>Good fit for:</b> ${esc(o.aiFit)}</p>`:""}${o.aiTip?`<p style="margin-top:4px"><b>Tip:</b> ${esc(o.aiTip)}</p>`:""}<p class="subtle" style="margin-top:4px">Written by Google's Gemini AI from this listing. It can be wrong.</p></div>`:""}
     <div class="d-sec"><p class="d-k">Application tips</p><p>${TIPS[o.comp]}</p></div>
     <div class="d-sec"><p class="d-k">Track your application</p><div class="track">${TRACK.map(x=>`<button type="button" data-track="${x}" aria-pressed="${st===x}">${x}</button>`).join("")}</div>
       ${st?`<p style="margin-top:8px">It's on your <a href="#checklist" data-close style="color:var(--primary);font-weight:600">App Checklist</a>${/Accepted|Not/.test(st)?` · <a href="#outcomes" data-close style="color:var(--primary);font-weight:600">share your result</a>`:""}.</p>`:""}</div>
@@ -1192,7 +1217,7 @@ function scoreFor(o){
 }
 function topMatches(n=40){ return ALL.map(scoreFor).filter(Boolean).sort((a,b)=>b.s-a.s||a.o.order-b.o.order).slice(0,n); }
 TOOLS.matcher = ()=>{
-  if(!profileReady()) return head("AI Matcher","Your best-fit opportunities","We rank all "+ALL.length+" listings against your grade, interests, location and preferences.")+needProfile("The matcher");
+  if(!profileReady()) return head("AI Matcher","Your best-fit opportunities","We rank every listing against your grade, interests, location and preferences.")+needProfile("The matcher");
   const m=topMatches(30), p=P.profile;
   const aiBox = aiReady()
     ? `<div class="panel tint"><h2>Ask the AI to pick for you</h2><p class="hint">The AI reads your profile and goals, looks over your top 40 matches, and explains the ones it would apply to first. Picks come from Google's Gemini AI and can be wrong, so check each program's page before you apply.</p>
@@ -1210,9 +1235,11 @@ TOOLS.matcher = ()=>{
     <div class="panel"><div class="p-head"><h2>Top ${m.length} matches</h2><span class="subtle">Match score out of 99</span></div>
       ${m.map(({o,s,why})=>`<div class="mcard"><div class="score">${s}</div><div class="grow" style="min-width:0"><button type="button" data-open="${o.id}" style="text-align:left;font-weight:600;font-size:15px">${esc(o.title)}</button><p class="subtle">${esc(o.company)} · ${esc(o.location)} · ${esc(o.type)}</p>
         <div class="why">${why.map(w=>`<span class="tag info">${esc(w)}</span>`).join("")}<span class="tag ${oddsFor(o).cls}">${oddsFor(o).label}</span></div>
+        ${o.aiTip?`<p class="ai-note"><b>${icon("sparkles")} Tip:</b> ${esc(o.aiTip)}</p>`:""}
         <div class="acts"><button class="b o sv" type="button" data-save="${o.id}" aria-pressed="${S.saved.has(o.id)}">${icon("bookmark")}${S.saved.has(o.id)?"Saved":"Save"}</button><button class="b o" type="button" data-open="${o.id}">Details</button><a class="b p" href="${esc(o.url)}" target="_blank" rel="noopener">Apply ${icon("external-link")}</a></div></div></div>`).join("")}
     </div></div>
     <div class="stack">${aiBox}
+      <div class="panel"><h2>About the tips</h2><p class="hint">Each listing's tip is written weekly by Google's Gemini AI from the listing's own details. AI can be wrong, so check the official page before you apply.</p></div>
       <div class="panel"><h2>How the score works</h2><p class="hint">Listings outside your grade are left out. Points come from matching your interests, format and cost choices, being in ${p.state?STATES[p.state]:"your state"} or remote, meeting the typical GPA, and being fully funded. Closed deadlines drop down.</p></div>
     </div></div>`;
 };
@@ -1269,7 +1296,7 @@ TOOLS.chances = ()=>{
       <td class="num"><input class="in sm" id="cc-a-${c.id}" data-cc="${c.id}" data-k="admit" value="${esc(c.admit)}" placeholder="%" inputmode="decimal" style="width:64px"></td>
       <td class="num"><input class="in sm" id="cc-l-${c.id}" data-cc="${c.id}" data-k="satLo" value="${esc(c.satLo)}" placeholder="low" inputmode="numeric" style="width:70px"> – <input class="in sm" id="cc-h-${c.id}" data-cc="${c.id}" data-k="satHi" value="${esc(c.satHi)}" placeholder="high" inputmode="numeric" style="width:70px"></td>
       <td class="num"><input class="in sm" id="cc-g-${c.id}" data-cc="${c.id}" data-k="gpa" value="${esc(c.gpa)}" placeholder="3.9" inputmode="decimal" style="width:60px"></td>
-      <td><span class="tag ${b.cls}">${b.label}</span><p class="subtle" style="margin-top:4px;max-width:240px">${esc(b.why)}${c.src==="ai"?" These figures are an AI estimate and can be wrong, so check the college's Common Data Set.":""}</p></td>
+      <td><span class="tag ${b.cls}">${b.label}</span><p class="subtle" style="margin-top:4px;max-width:240px">${esc(b.why)}${c.src==="ai"?` Numbers from an AI-assisted Google Search of official sources${COLLEGE_DB.year(c.name)?` (${esc(COLLEGE_DB.year(c.name))})`:""}. Double-check them on the college's Common Data Set.`:""}</p></td>
       <td style="white-space:nowrap">${aiReady()?`<button class="ib" type="button" data-act="cc-fill" data-id="${c.id}" aria-label="Fill numbers with AI" title="Fill numbers with AI" ${CH.busy[c.id]?"disabled":""}>${icon(CH.busy[c.id]?"loader":"sparkles")}</button>`:""}<button class="ib" type="button" data-act="cc-del" data-id="${c.id}" aria-label="Remove college">${icon("trash-2")}</button></td></tr>`; }).join("")
     : `<tr><td colspan="6" class="subtle" style="padding:16px 12px">Add the colleges you're thinking about. Admit rates and middle-50% SAT ranges are listed on each school's admissions page and Common Data Set.</td></tr>`;
   const counts={reach:0,target:0,likely:0}; P.colleges.forEach(c=>{ const b=collegeBucket(c); if(b.cls in counts) counts[b.cls]++; });
@@ -1278,7 +1305,7 @@ TOOLS.chances = ()=>{
     `<a class="b o" href="#profile">${icon("pencil")}Edit scores</a>`)+
   `<div class="kpis"><div class="kpi"><b>${counts.reach}</b><span>reach schools</span></div><div class="kpi"><b>${counts.target}</b><span>target schools</span></div><div class="kpi"><b>${counts.likely}</b><span>likely schools</span></div><div class="kpi"><b>${prog.length}</b><span>programs tracked</span></div></div>
   <div class="stack">
-    <div class="panel"><div class="p-head"><div><h2>Your college list</h2><p class="hint">A balanced list usually has 2–4 of each. ${aiReady()?"Tap ✦ to have the AI fill in a school's numbers.":""}</p></div>
+    <div class="panel"><div class="p-head"><div><h2>Your college list</h2><p class="hint">A balanced list usually has 2–4 of each. ${aiReady()?"Schools from the College Websites list fill in automatically.":""}</p></div>
       <form class="addc" data-form="add-college" style="margin:0"><input class="in" id="cc-new" placeholder="Add a college, like UT Austin" style="width:240px"><button class="b p" type="submit">${icon("plus")}Add</button></form></div>
       ${CH.err?`<p class="hint" style="color:var(--rose-700);margin-bottom:8px">${esc(CH.err)}</p>`:""}
       <div class="tbl-wrap"><table class="tbl"><thead><tr><th>College</th><th class="num">Admit rate</th><th class="num">SAT middle 50%</th><th class="num">Avg GPA</th><th>Your chances</th><th></th></tr></thead><tbody>${rows}</tbody></table></div>
@@ -1728,7 +1755,7 @@ const ACTIONS = {
   "gpa-del":d=>{ P.classes=P.classes.filter(c=>c.id!==d.id); persist(); renderTool(); },
   "gpa-sample":()=>{ const y=P.profile.grade||"10"; P.classes=[["English 2 Honors","Honors","94"],["AP World History","AP","91"],["Algebra 2 Honors","Honors","88"],["Chemistry Honors","Honors","92"],["Spanish 3","Regular","96"],["Computer Science 1","Regular","98"]].map(([n,l,g])=>({id:uid(),name:n,year:y,sem:"S1",level:l,grade:g})); persist(); toast("Sample classes added. Change them to yours."); renderTool(); },
   "gpa-to-profile":()=>{ const g=gpaOf(P.classes); if(!g) return; P.profile.gpa=g.uw.toFixed(2); P.profile.wgpa=g.w.toFixed(2); persist(); toast(`Profile GPA set to ${P.profile.gpa} (${P.profile.wgpa} weighted)`); },
-  "col-add":d=>{ if(!P.colleges.some(c=>c.name.toLowerCase()===d.name.toLowerCase())) P.colleges.push({id:uid(),name:d.name,admit:"",satLo:"",satHi:"",gpa:""}); persist(); toast(`${d.name} added to College Chances`); renderTool(); },
+  "col-add":d=>{ if(!P.colleges.some(c=>c.name.toLowerCase()===d.name.toLowerCase())){ const c={id:uid(),name:d.name,admit:"",satLo:"",satHi:"",gpa:""}; COLLEGE_DB.fill(c); P.colleges.push(c); } persist(); toast(`${d.name} added to College Chances`); renderTool(); },
   "exp-copy":()=>copyText(profileMarkdown(),"Profile copied"),
   "exp-md":d=>saveFile(d.fn+".md", profileMarkdown()),
   "exp-json":d=>saveFile(d.fn+"-backup.json", JSON.stringify({app:"interloop",version:1,exported:new Date().toISOString(),data:P},null,2)),
@@ -1808,7 +1835,7 @@ document.addEventListener("change", async e=>{
 });
 document.addEventListener("submit", e=>{
   const f=e.target, k=f.dataset.form; if(!k) return; e.preventDefault();
-  if(k==="add-college"){ const v=$("#cc-new").value.trim(); if(!v) return; const c={id:uid(),name:v,admit:"",satLo:"",satHi:"",gpa:""}; P.colleges.push(c); persist(); renderTool(); $("#cc-new").focus(); if(aiReady()) fillCollege(c.id); return; }
+  if(k==="add-college"){ const v=$("#cc-new").value.trim(); if(!v) return; const c={id:uid(),name:v,admit:"",satLo:"",satHi:"",gpa:""}; COLLEGE_DB.fill(c); P.colleges.push(c); persist(); renderTool(); $("#cc-new").focus(); return; }
   if(k==="add-score"){ const s=parseInt($("#ts-score").value), test=$("#ts-test").value, date=$("#ts-date").value||new Date().toISOString().slice(0,10);
     const ok = test==="ACT" ? s>=1&&s<=36 : test==="PSAT" ? s>=320&&s<=1520 : s>=400&&s<=1600;
     if(!ok){ toast(test==="ACT"?"ACT scores run from 1 to 36":test==="PSAT"?"PSAT scores run from 320 to 1520":"SAT scores run from 400 to 1600"); return; }
@@ -1833,7 +1860,7 @@ window.addEventListener("hashchange", route);
 if(!CLOUD.db){ const lo=store.get("outcomes",[]); MY_OUT=lo; OUT=lo.map(i=>({uid:"local",...i})); }
 renderDatabases(); renderStats(); { const so=$("#sort"); if(so) so.value=S.sort; } route(); updateFlight(); renderAccount(); paint();
 window.addEventListener("interloop-ai", ()=>refresh());
-loadLive();
+loadLive(); loadColleges();
 window.addEventListener("load", paint);
 
 (async function connect(){
@@ -1858,37 +1885,4 @@ window.addEventListener("load", paint);
 
 </script>
 
-<script type="module">
-/* Firebase AI Logic for Interloop. Everything here is public config, not a secret:
-   the Gemini key lives inside the Firebase project, and App Check stops other sites
-   and bots from using it. */
-import { initializeApp } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-app.js";
-import { initializeAppCheck, ReCaptchaEnterpriseProvider } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-app-check.js";
-import { getAI, getGenerativeModel, GoogleAIBackend } from "https://www.gstatic.com/firebasejs/13.1.0/firebase-ai.js";
-
-const firebaseConfig = {
-  apiKey: "AIzaSyBxMGgfyokTLfLBdJedBvDNynVr2S2oS5I",
-  authDomain: "interloop-425da.firebaseapp.com",
-  projectId: "interloop-425da",
-  storageBucket: "interloop-425da.firebasestorage.app",
-  messagingSenderId: "816778049391",
-  appId: "1:816778049391:web:c82fe03937d58df11bda9a"
-};
-const RECAPTCHA_SITE_KEY = "6LdqOSQuAAAAABU9QQRbe62RXeJgHdlIffRP31Dh";
-const MODEL = "gemini-3.5-flash-lite";    // free on the Spark plan
-
-try {
-  const app = initializeApp(firebaseConfig);
-  if (RECAPTCHA_SITE_KEY) {
-    initializeAppCheck(app, { provider: new ReCaptchaEnterpriseProvider(RECAPTCHA_SITE_KEY), isTokenAutoRefreshEnabled: true });
-  }
-  const model = getGenerativeModel(getAI(app, { backend: new GoogleAIBackend() }), { model: MODEL });
-  window.InterloopAI = {
-    async text(prompt) { const r = await model.generateContent(prompt); return r.response.text(); }
-  };
-  window.dispatchEvent(new Event("interloop-ai"));
-} catch (e) {
-  console.warn("Interloop AI is off:", e);
-}
-</script>
 </body></html>

@@ -10,7 +10,9 @@
 //                       schedule or a manual run (RESEARCH=true), not on every push.
 //                       Secret: GEMINI_API_KEY. Every result is checked against its official
 //                       page before it is kept. Kept results accumulate in data/found-listings.json.
-//  3. Idealist API    - planned for volunteering once partner access is approved.
+//  3. AI tips         - Gemini writes who each listing fits and one application tip (cached in data/ai-notes.json).
+//  4. College numbers - Gemini + Google Search looks up admit rates, SAT ranges and GPAs monthly (data/colleges.json).
+//  Planned: Idealist and Points of Light APIs for volunteering, once partner access is approved.
 //
 // Output: public/data/live-listings.json (what the site loads).
 // To hide a listing for good, add its id or URL on its own line in data/blocked.txt.
@@ -49,28 +51,6 @@ const normTitle = t => String(t || "").toLowerCase().replace(/&/g, "and").replac
 const idFor = s => "a" + [...s].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 7).toString(36);
 const readJSON = async (p, d) => { try { return JSON.parse(await readFile(p, "utf8")); } catch { return d; } };
 
-/* ---------- what's already on the site, so we don't add duplicates ---------- */
-async function builtInKeys() {
-  const keys = new Set();
-  try {
-    const html = await readFile("public/index.html", "utf8");
-    const i = html.indexOf("const DATA = ");
-    if (i >= 0) {
-      const rest = html.slice(i + 13);
-      const data = JSON.parse(rest.slice(0, rest.indexOf("};") + 1));
-      for (const r of data.rows) { keys.add(normTitle(r[0])); keys.add(normUrl(r[12])); }
-    }
-    const v = html.indexOf("const VOL = ");
-    if (v >= 0) {
-      const rest = html.slice(v + 12);
-      const vol = JSON.parse(rest.slice(0, rest.indexOf("]];") + 2));
-      for (const r of vol) { keys.add(normTitle(r[0])); if (!String(r[7]).startsWith("G:")) keys.add(normUrl(r[7])); }
-    }
-  } catch (e) { console.warn("Could not read built-in listings for de-duplication:", e.message); }
-  keys.delete("");
-  return keys;
-}
-
 /* ---------- 1. USAJOBS ---------- */
 async function usajobs() {
   if (!env.USAJOBS_API_KEY || !env.USAJOBS_EMAIL) { console.log("USAJOBS: no API key set, skipping."); return []; }
@@ -105,7 +85,7 @@ async function usajobs() {
       id, title: clip(m.PositionTitle, 120),
       company: clip([m.OrganizationName, m.DepartmentName].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i).join(" · "), 120),
       location: clip(m.PositionLocationDisplay || "See posting", 90), type: "Internship", category: guessCategory(text),
-      grades: [10, 11, 12], cost: "paid", stipend: money((m.PositionRemuneration || [])[0]), comp: "Competitive",
+      grades: [10, 11, 12], cost: "paid", stipend: money((m.PositionRemuneration || [])[0]), comp: "Not listed",
       format: remote ? "Remote" : tele ? "Hybrid" : "In-Person",
       duration: clip((m.PositionSchedule || []).map(x => x.Name).join(", ") || "Federal Pathways internship", 60),
       deadline: close ? short(close) : "", deadlineISO: close ? ymd(close) : "",
@@ -144,7 +124,7 @@ async function adzuna() {
       id, title: clip(r.title, 120), company: clip(r.company?.display_name || "See posting", 120),
       location: clip(r.location?.display_name || "See posting", 90), type: "Internship",
       category: guessCategory(text), grades: [10, 11, 12], cost: lo || hi ? "paid" : "free", stipend: pay,
-      comp: "Competitive", format: /\bremote\b/i.test(text) ? "Remote" : /\bhybrid\b/i.test(text) ? "Hybrid" : "In-Person",
+      comp: "Not listed", format: /\bremote\b/i.test(text) ? "Remote" : /\bhybrid\b/i.test(text) ? "Hybrid" : "In-Person",
       duration: r.contract_time === "part_time" ? "Part-time" : r.contract_time === "full_time" ? "Full-time" : "",
       deadline: "", deadlineISO: "", url: r.redirect_url,
       desc: clip(r.description, 240), equity: [], materials: ["resume"], source: "Adzuna", foundAt: (r.created || "").slice(0, 10)
@@ -200,18 +180,37 @@ Reply with only a JSON array. Each item:
  "duration": "e.g. 6 weeks in June-July", "url": "official page", "description": "one or two plain sentences, under 40 words"}`;
 }
 
-async function askGemini(text) {
-  const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
-    body: JSON.stringify({ contents: [{ role: "user", parts: [{ text }] }], tools: [{ google_search: {} }], generationConfig: { temperature: 0.2 } })
-  });
-  if (!res.ok) throw new Error(`Gemini HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
-  const j = await res.json();
-  const out = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || "").join("");
-  const m = out.match(/\[[\s\S]*\]/);
-  if (!m) return [];
-  try { const a = JSON.parse(m[0]); return Array.isArray(a) ? a : []; } catch { return []; }
+const MODELS = [...new Set([env.GEMINI_MODEL, "gemini-3.5-flash-lite", "gemini-flash-lite-latest", "gemini-flash-latest"].filter(Boolean))];
+let modelIdx = 0;
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+
+// Returns { items, domains }: the JSON list Gemini wrote, plus the websites its Google Search grounding used.
+async function askGemini(text, { search = true, json = false } = {}) {
+  for (let attempt = 0; attempt < 6; attempt++) {
+    const model = MODELS[modelIdx];
+    if (!model) throw new Error("no Gemini model accepted the request");
+    const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": env.GEMINI_API_KEY },
+      body: JSON.stringify({ contents: [{ role: "user", parts: [{ text }] }], ...(search ? { tools: [{ google_search: {} }] } : {}), generationConfig: { temperature: 0.2, ...(json && !search ? { responseMimeType: "application/json" } : {}) } })
+    });
+    if (res.status === 429 || res.status >= 500) { const wait = 15000 * (attempt + 1); console.log(`  Gemini busy (${res.status}), waiting ${wait / 1000}s`); await sleep(wait); continue; }
+    if (res.status === 404 || res.status === 400) {
+      const body = (await res.text()).slice(0, 300);
+      if (/model|not found|not supported|tool/i.test(body) && modelIdx < MODELS.length - 1) { console.log(`  ${model} unavailable (${res.status}), trying ${MODELS[modelIdx + 1]}`); modelIdx++; continue; }
+      throw new Error(`Gemini HTTP ${res.status}: ${body}`);
+    }
+    if (!res.ok) throw new Error(`Gemini HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
+    const j = await res.json();
+    const cand = j.candidates?.[0] || {};
+    const out = (cand.content?.parts || []).map(p => p.text || "").join("");
+    const domains = new Set((cand.groundingMetadata?.groundingChunks || []).map(c => String(c.web?.title || "").toLowerCase().replace(/^www\./, "")).filter(Boolean));
+    const m = out.match(/\[[\s\S]*\]/);
+    let items = [];
+    if (m) { try { const a = JSON.parse(m[0]); if (Array.isArray(a)) items = a; } catch {} }
+    return { items, domains, text: out };
+  }
+  throw new Error("Gemini kept rate-limiting");
 }
 
 // Opens the official page and checks it's real and aimed at teens.
@@ -222,6 +221,7 @@ async function verify(item) {
     const ctrl = new AbortController(); const t = setTimeout(() => ctrl.abort(), 15000);
     const res = await fetch(u, { redirect: "follow", signal: ctrl.signal, headers: { "User-Agent": "Mozilla/5.0 (compatible; InterloopListingCheck/1.0; +https://github.com)" } });
     clearTimeout(t);
+    if ([401, 403, 429, 503].includes(res.status)) return { ok: false, blocked: true, why: `site blocks automated checks (HTTP ${res.status})` };
     if (!res.ok) return { ok: false, why: `HTTP ${res.status}` };
     if (!/html/i.test(res.headers.get("content-type") || "")) return { ok: false, why: "not a web page" };
     const page = (await res.text()).replace(/<script[\s\S]*?<\/script>|<style[\s\S]*?<\/style>/gi, " ").replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").toLowerCase();
@@ -243,7 +243,7 @@ function toListing(type, x, url, foundAt) {
     type, category: CATEGORIES.includes(x.category) ? x.category : guessCategory(`${x.title} ${x.description}`),
     grades: grades.length ? [...new Set(grades)].sort() : [9, 10, 11, 12], cost,
     stipend: clip(x.costNote || (cost === "paid" ? "Paid" : cost === "free" ? "Free" : "Tuition (see website)"), 60),
-    comp: "Competitive", format: ["In-Person", "Hybrid", "Remote"].includes(x.format) ? x.format : "In-Person",
+    comp: "Not listed", format: ["In-Person", "Hybrid", "Remote"].includes(x.format) ? x.format : "In-Person",
     duration: clip(x.duration, 60),
     deadline: dl ? short(dl) : /rolling/i.test(x.deadline || "") ? "Rolling" : "",
     deadlineISO: dl ? ymd(dl) : "",
@@ -255,17 +255,23 @@ function toListing(type, x, url, foundAt) {
 async function research(existing, blocked) {
   if (!RESEARCH) { console.log("AI search: runs only on the weekly schedule or a manual run, skipping."); return existing; }
   if (!env.GEMINI_API_KEY) { console.log("AI search: no GEMINI_API_KEY set, skipping."); return existing; }
-  const seen = await builtInKeys();
+  const seen = new Set();
   for (const x of existing) { seen.add(normTitle(x.title)); seen.add(normUrl(x.url)); }
   const now = new Date().toISOString().slice(0, 10);
   const added = [], rejected = [];
   for (const [type, scope] of SEARCHES) {
-    let found = [];
-    try { found = await askGemini(prompt(type, scope)); } catch (e) { console.error(`AI search failed for "${scope}":`, e.message); continue; }
+    let found = [], domains = new Set();
+    try { ({ items: found, domains } = await askGemini(prompt(type, scope))); } catch (e) { console.error(`AI search failed for "${scope}":`, e.message); continue; }
+    await sleep(4000);
     for (const x of found) {
       if (!x || !x.title || !x.url) continue;
       if (seen.has(normTitle(x.title)) || seen.has(normUrl(x.url)) || blocked.has(x.url)) continue;
-      const v = await verify(x);
+      let v = await verify(x);
+      if (!v.ok && v.blocked) {
+        const host = (() => { try { return new URL(x.url).hostname.replace(/^www\./, "").toLowerCase(); } catch { return ""; } })();
+        const grounded = host && [...domains].some(d => d === host || host.endsWith("." + d) || d.endsWith("." + host));
+        if (grounded) v = { ok: true, finalUrl: x.url }; else v.why += ", and not among Google Search sources";
+      }
       if (!v.ok) { rejected.push(`${x.title} (${v.why})`); continue; }
       const l = toListing(type, x, v.finalUrl, now);
       if (blocked.has(l.id) || seen.has(normUrl(l.url))) continue;
@@ -288,10 +294,80 @@ async function recheck(list) {
     if (l.deadlineISO && new Date(l.deadlineISO + "T23:59:59") < today()) { console.log(`  closed: ${l.title}`); continue; }
     if (l.foundAt && new Date(l.foundAt) < cutoff) { console.log(`  stale: ${l.title}`); continue; }
     const v = await verify({ url: l.url, title: l.title, organization: l.company });
-    if (!v.ok && !/timed out|unreachable/.test(v.why)) { console.log(`  removed (${v.why}): ${l.title}`); continue; }
+    if (!v.ok && !v.blocked && !/timed out|unreachable/.test(v.why)) { console.log(`  removed (${v.why}): ${l.title}`); continue; }
     keep.push(l);
   }
   return keep;
+}
+
+/* ---------- 3. AI tips for each listing (Gemini, no search) ---------- */
+const NOTES = "data/ai-notes.json";
+async function addNotes(list) {
+  const cache = (await readJSON(NOTES, { notes: {} })).notes || {};
+  const need = list.filter(l => !cache[l.id]).slice(0, 200);
+  if (RESEARCH && env.GEMINI_API_KEY && need.length) {
+    for (let i = 0; i < need.length; i += 20) {
+      const batch = need.slice(i, i + 20).map(l => ({ id: l.id, title: l.title, organization: l.company, type: l.type, field: l.category, location: l.location, cost: l.stipend, grades: l.grades, description: l.desc }));
+      const text = `You advise US high school students. For each opportunity below, write two short, plain sentences in a friendly, direct voice:
+- "fit": who it's a great fit for (interests, grade, situation), under 25 words.
+- "tip": one concrete thing to do to apply well or stand out, under 25 words.
+Use only what's in the listing; don't invent requirements, dates or numbers.
+Reply with only a JSON array of {"id": "...", "fit": "...", "tip": "..."}.
+
+${JSON.stringify(batch)}`;
+      try {
+        const { items } = await askGemini(text, { search: false, json: true });
+        for (const n of items) if (n && n.id && batch.some(b => b.id === n.id)) cache[n.id] = { fit: clip(n.fit, 200), tip: clip(n.tip, 200) };
+      } catch (e) { console.error("AI tips failed for a batch:", e.message); }
+      await sleep(4000);
+    }
+    const ids = new Set(list.map(l => l.id));
+    for (const k of Object.keys(cache)) if (!ids.has(k)) delete cache[k];   // forget listings that are gone
+    await mkdir("data", { recursive: true });
+    await writeFile(NOTES, JSON.stringify({ updated: new Date().toISOString(), notes: cache }, null, 1) + "\n");
+    console.log(`AI tips: ${Object.keys(cache).length} listings have tips.`);
+  }
+  for (const l of list) if (cache[l.id]) { l.aiFit = cache[l.id].fit; l.aiTip = cache[l.id].tip; }
+}
+
+/* ---------- 4. College numbers (Gemini + Google Search), refreshed monthly ---------- */
+const COLLEGE_DATA = "data/colleges.json";
+async function colleges() {
+  let data = await readJSON(COLLEGE_DATA, null);
+  const stale = !data || !data.updated || (Date.now() - new Date(data.updated)) > 30 * 864e5;
+  if (RESEARCH && env.GEMINI_API_KEY && stale) {
+    let names = [];
+    try {
+      const html = await readFile("public/index.html", "utf8");
+      const m = html.match(/const COLLEGES = (\[\[[\s\S]*?\]\]);/);
+      names = m ? JSON.parse(m[1]).map(r => r[0]) : [];
+    } catch (e) { console.error("Could not read the college list:", e.message); }
+    const out = { ...(data?.colleges || {}) };
+    for (let i = 0; i < names.length; i += 5) {
+      const batch = names.slice(i, i + 5);
+      const text = `Use Google Search to look up the most recent first-year admissions numbers for each of these US colleges, preferring the college's own Common Data Set or admissions website: ${batch.join("; ")}.
+For each, give the overall admit rate (percent), the SAT middle 50% range for admitted or enrolled first-years (400-1600 scale), the average unweighted high school GPA of enrolled first-years if published, and the admissions year the numbers are from. Use null for anything you can't find. Don't guess.
+Reply with only a JSON array of {"name": "<exactly as given>", "admit": number|null, "satLo": number|null, "satHi": number|null, "gpa": number|null, "year": "e.g. 2025-26"}.`;
+      try {
+        const { items } = await askGemini(text);
+        for (const c of items) {
+          if (!c || !batch.includes(c.name)) continue;
+          const num = (v, lo, hi) => { const n = Number(v); return Number.isFinite(n) && n >= lo && n <= hi ? n : null; };
+          const rec = { admit: num(c.admit, 1, 100), satLo: num(c.satLo, 400, 1600), satHi: num(c.satHi, 400, 1600), gpa: num(c.gpa, 2, 4), year: clip(c.year, 20) };
+          if (rec.satLo && rec.satHi && rec.satLo > rec.satHi) { rec.satLo = rec.satHi = null; }
+          if (rec.admit != null) out[c.name] = rec;
+        }
+      } catch (e) { console.error("College lookup failed for a batch:", e.message); }
+      await sleep(4000);
+    }
+    if (Object.keys(out).length) {
+      data = { updated: new Date().toISOString(), colleges: out };
+      await mkdir("data", { recursive: true });
+      await writeFile(COLLEGE_DATA, JSON.stringify(data, null, 1) + "\n");
+      console.log(`Colleges: numbers for ${Object.keys(out).length} of ${names.length}.`);
+    }
+  }
+  if (data) { await mkdir("public/data", { recursive: true }); await writeFile("public/data/colleges.json", JSON.stringify(data)); }
 }
 
 /* ---------- run ---------- */
@@ -308,11 +384,13 @@ let found = (await readJSON(FOUND, { listings: [] })).listings || [];
 found = await recheck(found);
 found = await research(found, blocked);
 found = found.filter(l => !blocked.has(l.id) && !blocked.has(l.url) && !(l.deadlineISO && new Date(l.deadlineISO + "T23:59:59") < today()));
-if (RESEARCH) { await mkdir("data", { recursive: true }); await writeFile(FOUND, JSON.stringify({ updated: new Date().toISOString(), listings: found }, null, 1) + "\n"); }
+if (RESEARCH && (found.length || (await readFile(FOUND, "utf8").then(() => true, () => false)))) { await mkdir("data", { recursive: true }); await writeFile(FOUND, JSON.stringify({ updated: new Date().toISOString(), listings: found }, null, 1) + "\n"); }
 listings.push(...found);
 sources["AI search"] = found.length;
 
 const final = listings.filter(l => !blocked.has(l.id) && !blocked.has(l.url));
+await addNotes(final);
+await colleges();
 await mkdir("public/data", { recursive: true });
 await writeFile(OUT, JSON.stringify({ updated: new Date().toISOString(), sources, listings: final }, null, 1));
 console.log(`Wrote ${final.length} live listings to ${OUT}:`, sources);

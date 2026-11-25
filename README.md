@@ -5,8 +5,7 @@ Interloop by LEAP C.O. helps high schoolers in grades 9–12 find internships, s
 ## How it's hosted
 
 - **GitHub Pages:** `.github/workflows/deploy-pages.yml` publishes the `public/` folder on every push to `main` and every Monday.
-- **Firebase Hosting (test copy):** `firebase deploy --only hosting` publishes the same `public/` folder to interloop-425da.web.app.
-- **AI on the site:** Firebase AI Logic (Gemini) with App Check. No secret keys are in this repo; the Firebase config and reCAPTCHA site key in `public/index.html` are public by design.
+- **AI:** all AI runs ahead of time in GitHub Actions with Gemini: finding listings, writing a tip for each listing, and looking up college admissions numbers. The site itself makes no AI calls and holds no keys; keys live only in GitHub secrets.
 
 ## Live listings
 
@@ -17,6 +16,8 @@ Interloop by LEAP C.O. helps high schoolers in grades 9–12 find internships, s
 | USAJOBS API | Federal Pathways internships open to high schoolers | Every run | `USAJOBS_API_KEY`, `USAJOBS_EMAIL` |
 | Adzuna API | Internships from job boards that mention high schoolers | Every run | `ADZUNA_APP_ID`, `ADZUNA_APP_KEY` |
 | AI web search (Gemini + Google Search) | Summer programs, internships and volunteering from official sites | Mondays and manual runs | `GEMINI_API_KEY` |
+| AI tips (Gemini) | Who each listing fits plus one application tip, cached in `data/ai-notes.json` | Mondays and manual runs | `GEMINI_API_KEY` |
+| College numbers (Gemini + Google Search) | Admit rate, SAT range and GPA for the College Websites list, in `data/colleges.json` | Monthly | `GEMINI_API_KEY` |
 | Idealist API | Volunteering (planned, needs partner approval) | — | — |
 | Points of Light Engage | Volunteering (planned, needs partner approval) | — | — |
 
